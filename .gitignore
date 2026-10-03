@@ -1,1 +1,6 @@
 node_modules/
+
+# Nested clone of https://github.com/wanglin2/mind-map — kept locally only.
+# Committing it as a gitlink without a .gitmodules entry broke the Pages build
+# ("No url found for submodule path 'references/mind-map' in .gitmodules").
+references/mind-map/
