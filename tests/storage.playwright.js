@@ -241,6 +241,11 @@ async function run() {
     // before the global file handle/project state changes.
     await page.locator("#nodeDetail").fill("切换前最后编辑");
     await page.locator("#openFile").click();
+    // 打开 now browses the deployed data/ directory; the local file picker moved
+    // behind 本地文件…, so keep driving the file-handle path through that button.
+    await page.waitForSelector("#openLocalFile");
+    assert.equal(await page.locator("#openLocalFile").count(), 1, "open dialog should offer the local-file escape hatch");
+    await page.locator("#openLocalFile").click();
     await page.waitForSelector("text=打开文件节点");
     const flushedWrites = await page.evaluate(() => window.__testWrites.slice());
     assert.equal(
@@ -255,9 +260,9 @@ async function run() {
     );
     const openRecovery = await getStoredValue(page, "recovery-project");
     assert.equal(
-      await page.evaluate(() => window.__openPickerOptions.startIn === window.__dataDirectoryHandle),
-      true,
-      "Open should start in the data directory",
+      await page.evaluate(() => "startIn" in window.__openPickerOptions),
+      false,
+      "The local-file escape hatch is no longer scoped to the data directory",
     );
     assert.equal(
       await page.evaluate(() => "types" in window.__openPickerOptions),

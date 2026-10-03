@@ -2,8 +2,17 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#f5f6f7">
+  <meta name="color-scheme" content="light">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Smind">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="format-detection" content="telephone=no">
   <title>Smind</title>
+  <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="./favicon.svg">
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
@@ -19,21 +28,23 @@
           <input id="fileInput" type="file" accept=".mindmap.json,.json,application/json" hidden>
         </div>
 
-        <div class="swatches" aria-label="颜色选择">
-          <button data-color="red" title="红" type="button"></button>
-          <button data-color="orange" title="橙" type="button"></button>
-          <button data-color="yellow" title="黄" type="button"></button>
-          <button data-color="green" title="绿" type="button"></button>
-          <button data-color="cyan" title="青" type="button"></button>
-          <button data-color="blue" title="蓝" type="button"></button>
-          <button data-color="purple" title="紫" type="button"></button>
-          <button data-color="white" title="白" type="button"></button>
-          <button data-color="black" title="黑" type="button"></button>
-        </div>
+        <div class="toolbar-secondary">
+          <div class="swatches" aria-label="颜色选择">
+            <button data-color="red" title="红" type="button"></button>
+            <button data-color="orange" title="橙" type="button"></button>
+            <button data-color="yellow" title="黄" type="button"></button>
+            <button data-color="green" title="绿" type="button"></button>
+            <button data-color="cyan" title="青" type="button"></button>
+            <button data-color="blue" title="蓝" type="button"></button>
+            <button data-color="purple" title="紫" type="button"></button>
+            <button data-color="white" title="白" type="button"></button>
+            <button data-color="black" title="黑" type="button"></button>
+          </div>
 
-        <div class="font-control">
-          <input id="fontSize" aria-label="字号" type="range" min="12" max="30" value="16">
-          <span id="fontValue">16</span>
+          <div class="font-control">
+            <input id="fontSize" aria-label="字号" type="range" min="12" max="30" value="16">
+            <span id="fontValue">16</span>
+          </div>
         </div>
       </header>
 
@@ -58,6 +69,7 @@
       </div>
       <div class="detail-editor">
         <div class="detail-toolbar" aria-label="节点内容工具">
+          <button id="detailToolbarToggle" class="detail-toolbar-toggle" type="button" aria-expanded="false">格式</button>
           <div class="detail-tool-group" aria-label="高亮颜色">
             <span>高亮</span>
             <button data-detail-highlight="red" title="高亮红" type="button"></button>
@@ -118,7 +130,7 @@
     <form id="newFileForm" method="dialog">
       <h2 id="newFileDialogTitle">新建思维导图</h2>
       <label for="newFileName">文件名称</label>
-      <input id="newFileName" type="text" autocomplete="off" required>
+      <input id="newFileName" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" required>
       <p id="newFileError" class="new-file-error" role="alert"></p>
       <div class="new-file-actions">
         <button id="cancelNewFile" type="button">取消</button>
@@ -127,12 +139,14 @@
     </form>
   </dialog>
 
-  <dialog id="openFileDialog" class="new-file-dialog" aria-labelledby="openFileDialogTitle">
+  <dialog id="openFileDialog" class="new-file-dialog open-file-dialog" aria-labelledby="openFileDialogTitle">
     <form method="dialog">
       <h2 id="openFileDialogTitle">打开思维导图</h2>
+      <p id="openFileHint" class="open-file-hint">项目 data 目录</p>
       <div id="openFileList" class="open-file-list"></div>
       <p id="openFileError" class="new-file-error" role="alert"></p>
       <div class="new-file-actions">
+        <button id="openLocalFile" type="button">本地文件…</button>
         <button id="cancelOpenFile" type="submit">取消</button>
       </div>
     </form>

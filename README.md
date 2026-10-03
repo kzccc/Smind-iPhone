@@ -62,6 +62,26 @@ Smind 的项目数据放在 `data/` 目录中，文件格式为 `.mindmap.json`�
 - `data/Redis.mindmap.json`
 - `data/Golang.mindmap.json`
 
+`data/index.json` 是「打开」列表使用的清单。GitHub Pages 是静态站点，浏览器无法自己列出目录，所以**新增或删除数据文件后要重新生成清单**：
+
+```bash
+npm run data:index
+```
+
+清单读不到时，应用会退回到 GitHub Contents API 实时拉取 `data/` 列表。
+
+## 移动端（iPhone / Safari）
+
+这份部署以 iPhone Safari 为主要目标：
+
+- 「打开」直接列出项目 `data/` 目录，按名称和体积选择，不再弹出本地文件选择器；确实需要本地文件时用弹窗里的「本地文件…」。
+- 单指拖动平移画布，双指捏合缩放，双击节点重命名。
+- 手机上工具栏折成两行，颜色和字号那一行可以横向滑动。
+- 右侧内容编辑器变成底部面板，格式栏默认收起，点「格式」展开，把高度让给编辑区。
+- 顶部和底部按安全区留白，应用高度跟随 `visualViewport`，键盘弹出时编辑区不会被挡住。
+- 「另存为」和「导出MD」在 iOS 上走系统分享（可存到「文件」），其他平台仍是普通下载。
+- Safari 没有 File System Access API：「新建」会先在应用内建项目并写入恢复副本，再用「另存为」导出；从 `data/` 打开的项目是只读的，同样用「另存为」落盘。
+
 ## 快捷键
 
 - `Tab`：创建子节点。
@@ -82,19 +102,22 @@ Smind 的项目数据放在 `data/` 目录中，文件格式为 `.mindmap.json`�
 直接打开：
 
 ```text
-D:\Smind\src\index.html
+D:\Smind-iphone\src\index.html
 ```
 
 如果要运行自动化测试：
 
 ```bash
-cd /d D:\Smind
+cd /d D:\Smind-iphone
 npm run test:richtext
 npm run test:storage
 npm run test:keyboard
 npm run test:performance
+npm run test:save-conflict
 node src\logic.test.js
 ```
+
+测试通过 Playwright 驱动本机 Microsoft Edge，需要先安装 `playwright` 依赖。
 
 ## 当前状态
 

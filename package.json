@@ -2,6 +2,7 @@
   "name": "smind",
   "private": true,
   "scripts": {
+    "data:index": "node tools/build-data-index.mjs",
     "test:keyboard": "node tests/keyboard.playwright.js",
     "test:performance": "node tests/performance.playwright.js",
     "test:richtext": "node tests/richtext.playwright.js",

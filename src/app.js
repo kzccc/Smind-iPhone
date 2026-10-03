@@ -55,6 +55,7 @@ const state = {
   activeId: "node-1",
   nextId: 10,
   pointer: null,
+  pinch: null,
   editingId: null,
   clipboard: null,
   history: [],
@@ -255,6 +256,10 @@ const els = {
   inspectorResizer: document.querySelector("#inspectorResizer"),
   detailImageResizeHandle: document.querySelector("#detailImageResizeHandle"),
   inspectorToggle: document.querySelector("#inspectorToggle"),
+  inspector: document.querySelector("#inspector"),
+  openFileHint: document.querySelector("#openFileHint"),
+  openLocalFile: document.querySelector("#openLocalFile"),
+  detailToolbarToggle: document.querySelector("#detailToolbarToggle"),
 };
 
 const DETAIL_BLOCK_SPACER_LINES = 3;
@@ -687,6 +692,10 @@ function isBottomInspector() {
   return window.matchMedia("(max-width: 980px)").matches;
 }
 
+function isPhoneLayout() {
+  return window.matchMedia("(max-width: 700px)").matches;
+}
+
 function syncInspectorToggle() {
   if (!els.inspectorToggle) return;
   els.inspectorToggle.setAttribute("aria-expanded", String(state.inspectorExpanded));
@@ -1074,6 +1083,21 @@ async function createNewProjectFile() {
   try {
     fileName = normalizeNewProjectFileName(els.newFileName.value);
     await flushPendingSave();
+    const title = fileName.replace(/\.mindmap\.json$/i, "");
+    const project = MindMapLogic.createProjectDocument({ meta: { title } });
+    // Safari has no File System Access API, so keep the project in the app and
+    // rely on the recovery copy plus 另存为.
+    if (!window.showDirectoryPicker) {
+      state.fileHandle = null;
+      state.fileFingerprint = null;
+      state.currentFileName = fileName;
+      applyProject(project, { fitView: true });
+      await saveRecovery(currentProjectDocument());
+      state.dirty = false;
+      setSaveStatus("已新建，用「另存为」导出", "saved");
+      els.newFileDialog.close();
+      return;
+    }
     const directory = await ensureDataDirectoryHandle();
     try {
       await directory.getFileHandle(fileName);
@@ -1083,8 +1107,6 @@ async function createNewProjectFile() {
       if (error.name !== "NotFoundError") throw error;
     }
     const fileHandle = await directory.getFileHandle(fileName, { create: true });
-    const title = fileName.replace(/\.mindmap\.json$/i, "");
-    const project = MindMapLogic.createProjectDocument({ meta: { title } });
     state.fileHandle = fileHandle;
     state.currentFileName = fileName;
     applyProject(project, { fitView: true });
@@ -1221,67 +1243,200 @@ async function loadProjectFromFile(file, handle = null) {
   await rememberFileHandle();
 }
 
-async function openProjectFile() {
+const DATA_DIRECTORY_URL = "../data/";
+const DATA_INDEX_URL = `${DATA_DIRECTORY_URL}index.json`;
+
+function formatFileSize(bytes) {
+  const size = Number(bytes) || 0;
+  if (size <= 0) return "";
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function normalizeDataListing(rawEntries) {
+  if (!Array.isArray(rawEntries)) return [];
+  const seen = new Set();
+  const files = [];
+  rawEntries.forEach((entry) => {
+    const name = typeof entry === "string" ? entry : entry?.name;
+    if (typeof name !== "string" || !/\.json$/i.test(name)) return;
+    if (/^index\.json$/i.test(name) || seen.has(name)) return;
+    seen.add(name);
+    files.push({
+      name,
+      size: Number(typeof entry === "object" ? entry.size : 0) || 0,
+      mtime: Number(typeof entry === "object" ? entry.mtime : 0) || 0,
+    });
+  });
+  files.sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
+  return files;
+}
+
+function githubRepoForThisSite() {
+  const host = /^([a-z0-9-]+)\.github\.io$/i.exec(location.hostname);
+  if (!host) return null;
+  const segment = location.pathname.split("/").filter(Boolean)[0];
+  return { owner: host[1], repo: segment || `${host[1]}.github.io` };
+}
+
+async function fetchGithubDataListing() {
+  const target = githubRepoForThisSite();
+  if (!target) return [];
   try {
-    const dataDirectory = await ensureDataDirectoryHandle();
-    if (dataDirectory?.entries && els.openFileDialog?.showModal) {
-      const files = [];
-      for await (const [name, handle] of dataDirectory.entries()) {
-        if (handle.kind === "file" && /\.json$/i.test(name)) files.push({ name, handle });
-      }
-      files.sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
-      els.openFileList.replaceChildren();
-      els.openFileError.textContent = files.length ? "" : "data 目录中没有 JSON 文件";
-      for (const entry of files) {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.textContent = entry.name;
-        button.addEventListener("click", async () => {
-          try {
-            const file = await entry.handle.getFile();
-            await loadProjectFromFile(file, entry.handle);
-            els.openFileDialog.close();
-          } catch (error) {
-            els.openFileError.textContent = error.message || "打开失败";
-          }
-        });
-        els.openFileList.append(button);
-      }
-      els.openFileDialog.showModal();
-      return;
-    }
-    if (window.showOpenFilePicker) {
-      const [handle] = await window.showOpenFilePicker({ multiple: false, startIn: dataDirectory });
-      await loadProjectFromFile(await handle.getFile(), handle);
-      return;
-    }
-    els.fileInput.value = "";
-    els.fileInput.click();
+    const response = await fetch(`https://api.github.com/repos/${target.owner}/${target.repo}/contents/data`, {
+      headers: { Accept: "application/vnd.github+json" },
+    });
+    if (!response.ok) return [];
+    const entries = await response.json();
+    return normalizeDataListing(Array.isArray(entries) ? entries.filter((entry) => entry.type === "file") : []);
   } catch (error) {
-    if (error.name !== "AbortError") setSaveStatus("打开失败", "error");
+    return [];
   }
 }
 
-function downloadProject(project) {
-  const blob = new Blob([JSON.stringify(project, null, 2)], { type: "application/json" });
+// A static site cannot enumerate data/ on its own: read the manifest generated
+// by tools/build-data-index.mjs, and fall back to the live repository listing.
+async function fetchProjectDataListing() {
+  try {
+    const response = await fetch(DATA_INDEX_URL, { cache: "no-store" });
+    if (response.ok) {
+      const files = normalizeDataListing((await response.json())?.files);
+      if (files.length) return files;
+    }
+  } catch (error) {
+    // Fall through to the repository listing.
+  }
+  const live = await fetchGithubDataListing();
+  if (live.length) return live;
+  throw new Error("无法读取项目 data 目录");
+}
+
+function renderOpenFileList(files) {
+  els.openFileList.replaceChildren();
+  files.forEach((entry) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    const name = document.createElement("span");
+    name.className = "open-file-name";
+    name.textContent = entry.name.replace(/\.(mindmap\.)?json$/i, "");
+    const meta = document.createElement("span");
+    meta.className = "open-file-meta";
+    meta.textContent = formatFileSize(entry.size);
+    button.append(name, meta);
+    button.addEventListener("click", () => openProjectFromDataDirectory(entry));
+    els.openFileList.append(button);
+  });
+}
+
+async function openProjectFromDataDirectory(entry) {
+  els.openFileError.textContent = "正在读取…";
+  setSaveStatus("打开中", "saving");
+  try {
+    const response = await fetch(`${DATA_DIRECTORY_URL}${encodeURIComponent(entry.name)}`, { cache: "no-store" });
+    if (!response.ok) throw new Error(`无法读取 ${entry.name}（HTTP ${response.status}）`);
+    const text = await response.text();
+    const headerTime = Date.parse(response.headers.get("last-modified") || "") || 0;
+    await loadProjectFromFile({
+      name: entry.name,
+      size: new Blob([text]).size,
+      lastModified: entry.mtime || headerTime,
+      text: async () => text,
+    });
+    els.openFileDialog?.close();
+  } catch (error) {
+    els.openFileError.textContent = error.message || "打开失败";
+    setSaveStatus("打开失败", "error");
+  }
+}
+
+async function openLocalProjectFile() {
+  els.openFileDialog?.close();
+  try {
+    if (window.showOpenFilePicker) {
+      const [handle] = await window.showOpenFilePicker({ multiple: false });
+      await loadProjectFromFile(await handle.getFile(), handle);
+      return;
+    }
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    // Fall through to the plain file input.
+  }
+  els.fileInput.value = "";
+  els.fileInput.click();
+}
+
+async function openProjectFile() {
+  if (!els.openFileDialog?.showModal) {
+    await openLocalProjectFile();
+    return;
+  }
+  els.openFileList.replaceChildren();
+  const loading = document.createElement("p");
+  loading.className = "open-file-loading";
+  loading.textContent = "正在读取项目 data 目录…";
+  els.openFileList.append(loading);
+  els.openFileError.textContent = "";
+  els.openFileDialog.showModal();
+  try {
+    const files = await fetchProjectDataListing();
+    if (!files.length) {
+      els.openFileList.replaceChildren();
+      els.openFileError.textContent = "data 目录中没有思维导图文件";
+      return;
+    }
+    renderOpenFileList(files);
+  } catch (error) {
+    els.openFileList.replaceChildren();
+    els.openFileError.textContent = `${error.message}，可改用「本地文件…」`;
+  }
+}
+
+function isIosLike() {
+  const ua = navigator.userAgent;
+  return /iPhone|iPad|iPod/i.test(ua) || (/Macintosh/i.test(ua) && navigator.maxTouchPoints > 1);
+}
+
+// iOS Safari is unreliable about the download attribute on blob URLs and never
+// offers "save to Files" on its own, so share the file when the Web Share API
+// accepts it. Returns "shared" | "downloaded" | "cancelled".
+async function saveBlobToDevice(blob, fileName) {
+  if (isIosLike() && typeof File === "function" && navigator.canShare) {
+    try {
+      const file = new File([blob], fileName, { type: blob.type });
+      if (navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: fileName });
+        return "shared";
+      }
+    } catch (error) {
+      if (error.name === "AbortError") return "cancelled";
+      // Fall through to the download link.
+    }
+  }
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = state.currentFileName.endsWith(".json") ? state.currentFileName : "未命名.mindmap.json";
+  link.download = fileName;
+  link.rel = "noopener";
+  document.body.append(link);
   link.click();
-  URL.revokeObjectURL(url);
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 30000);
+  return "downloaded";
 }
 
-function exportMarkdownFile() {
+async function downloadProject(project) {
+  const fileName = state.currentFileName.endsWith(".json") ? state.currentFileName : "未命名.mindmap.json";
+  const blob = new Blob([JSON.stringify(project, null, 2)], { type: "application/json" });
+  return saveBlobToDevice(blob, fileName);
+}
+
+async function exportMarkdownFile() {
   const title = state.projectMeta?.title || state.currentFileName.replace(/\.mindmap\.json$|\.json$/i, "");
   const markdown = MindMapLogic.projectToMarkdown(nodes, title || "未命名思维导图");
   const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `${title || "mindmap"}.md`;
-  link.click();
-  URL.revokeObjectURL(url);
+  const result = await saveBlobToDevice(blob, `${title || "mindmap"}.md`);
+  if (result !== "cancelled") setSaveStatus(result === "shared" ? "已分享" : "已导出", "saved");
 }
 
 async function saveAsProjectFile() {
@@ -2734,8 +2889,93 @@ function render() {
   syncInspector();
 }
 
+/* ----------------------------- touch gestures ----------------------------- */
+
+const DOUBLE_TAP_MS = 320;
+const touchPointers = new Map();
+let lastNodeTap = null;
+
+function touchPointList() {
+  return [...touchPointers.values()];
+}
+
+function cancelActivePointer() {
+  const pointer = state.pointer;
+  if (!pointer) return;
+  if (pointer.type === "pan") els.shell.classList.remove("panning");
+  if (pointer.type === "box") hideSelectionBox();
+  state.pointer = null;
+}
+
+function startPinchGesture() {
+  const [first, second] = touchPointList();
+  if (!first || !second) return;
+  cancelActivePointer();
+  els.shell.classList.remove("panning");
+  const centerX = (first.x + second.x) / 2;
+  const centerY = (first.y + second.y) / 2;
+  state.pinch = {
+    distance: Math.max(1, Math.hypot(first.x - second.x, first.y - second.y)),
+    scale: state.scale,
+    anchor: screenToWorld(centerX, centerY),
+  };
+}
+
+function updatePinchGesture() {
+  const pinch = state.pinch;
+  const points = touchPointList();
+  if (!pinch || points.length < 2) return;
+  const [first, second] = points;
+  const centerX = (first.x + second.x) / 2;
+  const centerY = (first.y + second.y) / 2;
+  const distance = Math.hypot(first.x - second.x, first.y - second.y);
+  const scale = Math.max(minZoomScale(), Math.min(ZOOM_MAX_SCALE, pinch.scale * (distance / pinch.distance)));
+  const local = clientToLocal(centerX, centerY);
+  state.scale = scale;
+  // Re-anchoring from the moving centre each frame also pans while pinching.
+  state.tx = local.x - pinch.anchor.x * scale;
+  state.ty = local.y - pinch.anchor.y * scale;
+  updateViewport();
+  markDirty();
+}
+
+function onTouchPointerDown(event) {
+  if (event.pointerType !== "touch") return;
+  touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  if (touchPointers.size === 2) startPinchGesture();
+}
+
+function onTouchPointerMove(event) {
+  if (event.pointerType !== "touch" || !touchPointers.has(event.pointerId)) return;
+  touchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  if (state.pinch) updatePinchGesture();
+}
+
+function onTouchPointerEnd(event) {
+  if (event.pointerType !== "touch") return;
+  touchPointers.delete(event.pointerId);
+  if (state.pinch && touchPointers.size < 2) state.pinch = null;
+}
+
+// iOS does not reliably surface dblclick for touch, so detect the second tap.
+function registerNodeTap(id) {
+  if (!id) return;
+  const now = Date.now();
+  const previous = lastNodeTap;
+  lastNodeTap = { id, time: now };
+  if (!previous || previous.id !== id || now - previous.time > DOUBLE_TAP_MS) return;
+  lastNodeTap = null;
+  const title = renderCache.nodes.get(id)?.querySelector(".node-title");
+  if (title) beginTitleEdit(title, id);
+}
+
+function syncAppHeight() {
+  const height = Math.round(window.visualViewport?.height || window.innerHeight || 0);
+  if (height > 0) document.documentElement.style.setProperty("--app-height", `${height}px`);
+}
+
 function onNodePointerDown(event, id) {
-  if (state.editingId) {
+  if (state.editingId || state.pinch) {
     return;
   }
 
@@ -2788,6 +3028,7 @@ function onNodePointerDown(event, id) {
   markSelectedNodes();
   state.pointer = {
     type: "node",
+    nodeId: id,
     startX: event.clientX,
     startY: event.clientY,
     lastWorld: world,
@@ -2798,7 +3039,7 @@ function onNodePointerDown(event, id) {
 }
 
 function onShellPointerDown(event) {
-  if (event.button !== 0 || event.target.closest(".node")) return;
+  if (event.button !== 0 || state.pinch || event.target.closest(".node")) return;
   state.connectingFromIds = [];
   const world = screenToWorld(event.clientX, event.clientY);
   const additive = event.ctrlKey || event.metaKey;
@@ -2806,6 +3047,8 @@ function onShellPointerDown(event) {
     type: state.mode === "select" || event.ctrlKey || event.metaKey ? "box" : "pan",
     startX: event.clientX,
     startY: event.clientY,
+    lastClientX: event.clientX,
+    lastClientY: event.clientY,
     lastWorld: world,
     moved: false,
     additive,
@@ -2847,8 +3090,14 @@ function onPointerMove(event) {
   pointer.moved = pointer.moved || moved;
 
   if (pointer.type === "pan") {
-    state.tx += event.movementX;
-    state.ty += event.movementY;
+    // movementX/movementY is not dependable for touch pointers in Safari, so
+    // track the previous client position explicitly.
+    const dx = event.clientX - pointer.lastClientX;
+    const dy = event.clientY - pointer.lastClientY;
+    pointer.lastClientX = event.clientX;
+    pointer.lastClientY = event.clientY;
+    state.tx += dx;
+    state.ty += dy;
     updateViewport();
     markDirty();
     return;
@@ -2937,6 +3186,9 @@ function onPointerUp(event) {
       clearSelection();
       render();
     }
+  }
+  if (pointer.type === "node" && !pointer.moved && event.pointerType === "touch") {
+    registerNodeTap(pointer.nodeId);
   }
   state.pointer = null;
 }
@@ -3171,9 +3423,17 @@ els.detailFontSize.addEventListener("input", () => {
   applyDetailFontSize(Number(els.detailFontSize.value));
 });
 els.openFile.addEventListener("click", openProjectFile);
+els.openLocalFile?.addEventListener("click", openLocalProjectFile);
 els.newFile?.addEventListener("click", openNewProjectDialog);
 els.cancelNewFile?.addEventListener("click", () => els.newFileDialog.close());
-els.openFileDialog?.addEventListener("close", () => els.openFileList?.replaceChildren());
+els.openFileDialog?.addEventListener("close", () => {
+  els.openFileList?.replaceChildren();
+  els.openFileError.textContent = "";
+});
+els.detailToolbarToggle?.addEventListener("click", () => {
+  const collapsed = els.inspector?.classList.toggle("detail-tools-collapsed");
+  els.detailToolbarToggle.setAttribute("aria-expanded", String(!collapsed));
+});
 els.newFileForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
   await createNewProjectFile();
@@ -3231,9 +3491,14 @@ els.inspectorToggle?.addEventListener("click", (event) => {
   event.stopPropagation();
   toggleInspectorExpanded();
 });
+// Capture phase so the pinch state is known before a node starts dragging.
+els.shell.addEventListener("pointerdown", onTouchPointerDown, { capture: true });
 els.shell.addEventListener("pointerdown", onShellPointerDown);
 window.addEventListener("pointermove", onPointerMove);
+window.addEventListener("pointermove", onTouchPointerMove);
 window.addEventListener("pointerup", onPointerUp);
+window.addEventListener("pointerup", onTouchPointerEnd);
+window.addEventListener("pointercancel", onTouchPointerEnd);
 window.addEventListener("mousemove", (event) => {
   state.lastMouseWorld = screenToWorld(event.clientX, event.clientY);
 });
@@ -3255,11 +3520,20 @@ window.addEventListener("keyup", (event) => {
   }
 });
 window.addEventListener("resize", () => {
+  syncAppHeight();
   setInspectorWidth(state.inspectorExpanded ? window.innerWidth : state.inspectorWidth);
   setInspectorHeight(state.inspectorHeight, { allowFullHeight: state.inspectorExpanded && isBottomInspector() });
   render();
   positionDetailImageResizeHandle();
 });
+window.visualViewport?.addEventListener("resize", syncAppHeight);
+window.visualViewport?.addEventListener("scroll", syncAppHeight);
+window.addEventListener("orientationchange", () => window.setTimeout(syncAppHeight, 150));
+// Safari's own pinch-zoom and double-tap zoom must not fight the canvas gestures.
+["gesturestart", "gesturechange", "gestureend"].forEach((type) => {
+  els.shell.addEventListener(type, (event) => event.preventDefault());
+});
+els.shell.addEventListener("dblclick", (event) => event.preventDefault());
 window.addEventListener("beforeunload", (event) => {
   if (!state.dirty && !state.saving) return;
   event.preventDefault();
@@ -3269,7 +3543,13 @@ window.addEventListener("beforeunload", (event) => {
 async function bootstrap() {
   state.windowSessionId = sessionStorage.getItem("smind-window-session") || crypto.randomUUID();
   sessionStorage.setItem("smind-window-session", state.windowSessionId);
+  syncAppHeight();
   setInspectorWidth(state.inspectorWidth);
+  if (isPhoneLayout()) {
+    // Phones start with the format bar folded away so the editor keeps its room.
+    els.inspector?.classList.add("detail-tools-collapsed");
+    setInspectorHeight(Math.round(Math.min(360, Math.max(200, window.innerHeight * 0.42))));
+  }
   setMode("pan");
   try {
     await navigator.storage?.persist?.();
