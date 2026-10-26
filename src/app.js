@@ -891,7 +891,7 @@ function openProjectDb(dbName = PROJECT_DB_NAME) {
       request.result.createObjectStore("kv");
     };
     request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    request.onerror = () => reject(request.error || new Error("IndexedDB 请求失败"));
   });
 }
 
@@ -906,7 +906,7 @@ async function putStoredValue(key, value) {
     };
     tx.onerror = () => {
       db.close();
-      reject(tx.error);
+      reject(tx.error || new Error("IndexedDB 事务失败"));
     };
   });
 }
@@ -917,7 +917,7 @@ async function deleteStoredValue(key) {
     const tx = db.transaction("kv", "readwrite");
     tx.objectStore("kv").delete(key);
     tx.oncomplete = () => { db.close(); resolve(); };
-    tx.onerror = () => { db.close(); reject(tx.error); };
+    tx.onerror = () => { db.close(); reject(tx.error || new Error("IndexedDB 事务失败")); };
   });
 }
 
@@ -927,7 +927,7 @@ async function readStoredValue(dbName, key) {
     const tx = db.transaction("kv", "readonly");
     const request = tx.objectStore("kv").get(key);
     request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    request.onerror = () => reject(request.error || new Error("IndexedDB 请求失败"));
     tx.oncomplete = () => db.close();
   });
 }
@@ -941,12 +941,19 @@ async function getStoredValue(key) {
   return legacyValue;
 }
 
+// History entries are full copies of the project. Keeping twenty of them is
+// fine for a hand-drawn map but fills the IndexedDB quota on iOS once the
+// document is a few megabytes, so only small documents get history.
+const RECOVERY_HISTORY_MAX_BYTES = 1024 * 1024;
+
 async function saveRecovery(project, fileName = state.currentFileName) {
-  const snapshot = JSON.parse(JSON.stringify(project));
+  // Serialize once: the same string yields the detached snapshot and its size,
+  // so verification below no longer stringifies the whole project twice.
+  const snapshotJson = JSON.stringify(project);
   const recovery = {
     savedAt: new Date().toISOString(),
     fileName: String(fileName || "未命名.mindmap.json"),
-    project: snapshot,
+    project: JSON.parse(snapshotJson),
   };
   const perFileKey = `recovery-project-file-${encodeURIComponent(recovery.fileName)}`;
   await Promise.all([
@@ -957,9 +964,10 @@ async function saveRecovery(project, fileName = state.currentFileName) {
     putStoredValue(perFileKey, recovery),
   ]);
   const verified = await readStoredValue(PROJECT_DB_NAME, perFileKey);
-  if (!verified || verified.fileName !== recovery.fileName || JSON.stringify(verified.project) !== JSON.stringify(snapshot)) {
+  if (!verified || verified.savedAt !== recovery.savedAt || verified.fileName !== recovery.fileName) {
     throw new Error("恢复副本校验失败");
   }
+  if (snapshotJson.length > RECOVERY_HISTORY_MAX_BYTES) return;
   const indexKey = sessionStorageKey("recovery-history-index");
   let history = await getStoredValue(indexKey);
   if (!Array.isArray(history)) history = [];
@@ -971,6 +979,24 @@ async function saveRecovery(project, fileName = state.currentFileName) {
     try { await deleteStoredValue(expiredKey); } catch (error) { /* best effort */ }
   }
   await putStoredValue(indexKey, history);
+}
+
+// Writing the recovery copy is bookkeeping, not part of showing a file: cloning
+// a multi-megabyte project into IndexedDB takes seconds on a phone, so let the
+// map appear first and persist the copy once the main thread goes idle.
+function scheduleRecoverySave(project, fileName = state.currentFileName) {
+  const revision = state.saveRevision;
+  const run = () => {
+    // The user may have edited (and autosaved) while we waited; writing this
+    // older snapshot then would roll the recovery copy backwards.
+    if (state.saveRevision !== revision) return;
+    saveRecovery(project, fileName).catch(() => {
+      // Best effort: quota and private-mode failures must not block the
+      // document that is already on screen.
+    });
+  };
+  if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(run, { timeout: 3000 });
+  else window.setTimeout(run, 300);
 }
 
 function fileFingerprint(file) {
@@ -1118,7 +1144,7 @@ async function createNewProjectFile() {
     els.newFileDialog.close();
   } catch (error) {
     if (error.name === "AbortError") return;
-    showNewFileError(error.message || "新建失败");
+    showNewFileError(describeError(error, "新建失败"));
   }
 }
 
@@ -1239,7 +1265,7 @@ async function loadProjectFromFile(file, handle = null) {
   state.saveConflict = false;
   applyProject(project);
   setSaveStatus("已打开", "saved");
-  await saveRecovery(currentProjectDocument());
+  scheduleRecoverySave(currentProjectDocument());
   await rememberFileHandle();
 }
 
@@ -1329,23 +1355,60 @@ function renderOpenFileList(files) {
   });
 }
 
+function describeError(error, fallback = "打开失败") {
+  if (!error) return fallback;
+  if (typeof error === "string") return error;
+  return error.message || String(error) || fallback;
+}
+
+// Stream the project file so the dialog can show real progress instead of a
+// bare "正在读取…" that looks frozen on a phone. Decoding chunk by chunk also
+// avoids holding a second full-size copy of the text.
+async function readResponseText(response, onProgress) {
+  if (!response.body || typeof response.body.getReader !== "function") {
+    const text = await response.text();
+    return { text, bytes: new Blob([text]).size };
+  }
+  const total = Number(response.headers.get("content-length")) || 0;
+  const countable = Boolean(total) && !response.headers.get("content-encoding");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  const chunks = [];
+  let bytes = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    bytes += value.byteLength;
+    chunks.push(decoder.decode(value, { stream: true }));
+    if (countable) onProgress?.(Math.min(99, Math.round((bytes / total) * 100)));
+  }
+  chunks.push(decoder.decode());
+  return { text: chunks.join(""), bytes };
+}
+
 async function openProjectFromDataDirectory(entry) {
-  els.openFileError.textContent = "正在读取…";
+  const showProgress = (percent) => {
+    els.openFileError.textContent = percent === null ? "正在读取…" : `正在读取… ${percent}%`;
+  };
+  showProgress(null);
   setSaveStatus("打开中", "saving");
   try {
-    const response = await fetch(`${DATA_DIRECTORY_URL}${encodeURIComponent(entry.name)}`, { cache: "no-store" });
+    // Deliberately no cache:"no-store": GitHub Pages already serves these with
+    // max-age=600, and re-downloading tens of megabytes on every open is the
+    // single biggest reason opening a map takes half a minute on a phone.
+    const response = await fetch(`${DATA_DIRECTORY_URL}${encodeURIComponent(entry.name)}`);
     if (!response.ok) throw new Error(`无法读取 ${entry.name}（HTTP ${response.status}）`);
-    const text = await response.text();
     const headerTime = Date.parse(response.headers.get("last-modified") || "") || 0;
+    const { text, bytes } = await readResponseText(response, showProgress);
     await loadProjectFromFile({
       name: entry.name,
-      size: new Blob([text]).size,
+      size: bytes,
       lastModified: entry.mtime || headerTime,
       text: async () => text,
     });
     els.openFileDialog?.close();
   } catch (error) {
-    els.openFileError.textContent = error.message || "打开失败";
+    els.openFileError.textContent = describeError(error);
     setSaveStatus("打开失败", "error");
   }
 }
@@ -1388,7 +1451,7 @@ async function openProjectFile() {
     renderOpenFileList(files);
   } catch (error) {
     els.openFileList.replaceChildren();
-    els.openFileError.textContent = `${error.message}，可改用「本地文件…」`;
+    els.openFileError.textContent = `${describeError(error, "无法读取项目 data 目录")}，可改用「本地文件…」`;
   }
 }
 
